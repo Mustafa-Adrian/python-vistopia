@@ -122,26 +122,74 @@ def show_content(ctx: click.Context, **argv):
 
 
 @main.command("save-show", help="保存节目至本地，并添加封面和 ID3 信息")
-@click.option("--id", type=click.INT, required=True)
+@click.option("--id", type=click.INT, help="Show ID.")
+@click.option("--id-list", help="Show IDs in the form '1-3,8,10'.")
 @click.option("--no-tag", is_flag=True, default=False, help="Do not add IDv3 tags.")
 @click.option("--episode-id", help="Episode ID in the form '1-3,4,8'")
+@click.option(
+    "--skip-first",
+    type=click.INT,
+    default=0,
+    show_default=True,
+    help="Skip the first N matched episodes.",
+)
+@click.option(
+    "--skip-existing",
+    is_flag=True,
+    default=False,
+    help="Skip downloading and tagging files that already exist and are not empty.",
+)
+@click.option(
+    "--playlist-only",
+    is_flag=True,
+    default=False,
+    help="Only write playlist/catalog files; do not download or tag audio.",
+)
 @click.pass_context
 def save_show(ctx: click.Context, **argv):
     content_id = argv.pop("id")
+    id_list = argv.pop("id_list", None)
     episode_id = argv.pop("episode_id", None)
     episodes = set(range_expand(episode_id) if episode_id else [])
 
-    logger.debug(
-        json.dumps(
-            dump_model(ctx.obj.visitor.get_catalog(content_id)), indent=2, ensure_ascii=False
-        )
-    )
+    if content_id is None and not id_list:
+        raise click.UsageError("Either --id or --id-list is required.")
+    if content_id is not None and id_list:
+        raise click.UsageError("Use either --id or --id-list, not both.")
+    if id_list and episode_id:
+        raise click.UsageError("--episode-id can only be used with --id, not --id-list.")
 
-    ctx.obj.visitor.save_show(
-        content_id,
-        no_tag=argv.pop("no_tag"),
-        episodes=episodes,
-    )
+    content_ids = [content_id] if content_id is not None else range_expand(id_list)
+    no_tag = argv.pop("no_tag")
+    skip_first = argv.pop("skip_first")
+    skip_existing = argv.pop("skip_existing")
+    playlist_only = argv.pop("playlist_only")
+    show_total = len(content_ids)
+
+    for show_index, current_id in enumerate(content_ids, start=1):
+        click.echo(
+            "Show {}/{} started: id={}".format(
+                show_index,
+                show_total,
+                current_id,
+            )
+        )
+        logger.debug(
+            json.dumps(
+                dump_model(ctx.obj.visitor.get_catalog(current_id)), indent=2, ensure_ascii=False
+            )
+        )
+
+        ctx.obj.visitor.save_show(
+            current_id,
+            no_tag=no_tag,
+            episodes=episodes,
+            skip_first=skip_first,
+            skip_existing=skip_existing,
+            playlist_only=playlist_only,
+            show_index=show_index,
+            show_total=show_total,
+        )
 
 
 @main.command("save-transcript", help="保存节目文稿至本地")

@@ -5,6 +5,7 @@ from logging import getLogger
 from functools import lru_cache
 from typing import List, Optional
 from pathvalidate import sanitize_filename
+import click
 
 from .models import (
     Article,
@@ -70,34 +71,156 @@ class Visitor:
 
     def save_show(self, id: int,
                   no_tag: bool = False, no_cover: bool = False,
-                  episodes: Optional[set] = None):
+                  episodes: Optional[set] = None,
+                  skip_first: int = 0,
+                  skip_existing: bool = False,
+                  playlist_only: bool = False,
+                  show_index: int = 1,
+                  show_total: int = 1):
 
         from pathlib import Path
 
+        show_prefix = "Show {}/{}".format(show_index, show_total)
         catalog = self.get_catalog(id)
-        series = self.get_content_show(id)
 
         show_dir = Path(catalog.title)
         show_dir.mkdir(exist_ok=True)
 
+        catalog_items = self._iter_catalog_items(catalog, episodes)
+        self.write_playlist_files(show_dir, catalog_items)
+        episode_total = len(catalog_items)
+        click.echo(
+            "{} catalog ready: id={}, title={}, episodes={}".format(
+                show_prefix,
+                id,
+                catalog.title,
+                episode_total,
+            )
+        )
+
+        if playlist_only:
+            click.echo(
+                "{} playlist-only completed: id={}, title={}".format(
+                    show_prefix,
+                    id,
+                    catalog.title,
+                )
+            )
+            return
+
+        series = self.get_content_show(id)
+
+        for episode_index, (article, fname) in enumerate(catalog_items, start=1):
+            episode_prefix = "{} episode {}/{}".format(
+                show_prefix,
+                episode_index,
+                episode_total,
+            )
+            if skip_first > 0:
+                click.echo(
+                    "{} skipped by --skip-first: {}".format(
+                        episode_prefix,
+                        article.title,
+                    )
+                )
+                skip_first -= 1
+                continue
+
+            fname_exists = fname.exists()
+            fname_size = fname.stat().st_size if fname_exists else 0
+
+            if skip_existing and fname_exists and fname_size > 0:
+                click.echo(
+                    "{} skipped existing: api_sort_number={}, file={}".format(
+                        episode_prefix,
+                        article.sort_number,
+                        fname,
+                    )
+                )
+                continue
+
+            if not fname_exists or fname_size == 0:
+                click.echo(
+                    "{} downloading: api_sort_number={}, title={}".format(
+                        episode_prefix,
+                        article.sort_number,
+                        article.title,
+                    )
+                )
+                self._download_to_file(article.media_key_full_url, fname)
+                click.echo(
+                    "{} saved: file={}".format(episode_prefix, fname)
+                )
+            else:
+                click.echo(
+                    "{} using existing: api_sort_number={}, file={}".format(
+                        episode_prefix,
+                        article.sort_number,
+                        fname,
+                    )
+                )
+
+            if not no_tag:
+                self.retag(str(fname), article, catalog, series)
+
+            if not no_cover:
+                self.retag_cover(str(fname), article, catalog, series)
+
+        click.echo(
+            "{} completed: id={}, title={}".format(
+                show_prefix,
+                id,
+                catalog.title,
+            )
+        )
+
+    @staticmethod
+    def _iter_catalog_items(catalog: Catalog, episodes: Optional[set] = None):
+        from pathlib import Path
+
+        show_dir = Path(catalog.title)
+        catalog_items = []
         for part in catalog.catalog:
             for article in part.part:
-
-                if episodes and \
-                        int(article.sort_number) not in episodes:
+                if episodes and int(article.sort_number) not in episodes:
                     continue
 
                 fname = show_dir / "{}.mp3".format(
                     sanitize_filename(article.title)
                 )
-                if not fname.exists():
-                    urlretrieve(article.media_key_full_url, fname)
+                catalog_items.append((article, fname))
+        return catalog_items
 
-                if not no_tag:
-                    self.retag(str(fname), article, catalog, series)
+    @staticmethod
+    def write_playlist_files(show_dir, catalog_items):
+        playlist_fname = show_dir / "playlist.m3u8"
+        catalog_fname = show_dir / "catalog.tsv"
 
-                if not no_cover:
-                    self.retag_cover(str(fname), article, catalog, series)
+        with open(playlist_fname, "w", encoding="utf-8") as fp:
+            fp.write("#EXTM3U\n")
+            for article, fname in catalog_items:
+                fp.write("#EXTINF:-1,{}\n".format(article.title))
+                fp.write("{}\n".format(fname.name))
+
+        with open(catalog_fname, "w", encoding="utf-8") as fp:
+            fp.write("index\ttitle\tapi_sort_number\tfilename\n")
+            for index, (article, fname) in enumerate(catalog_items, start=1):
+                fp.write("{}\t{}\t{}\t{}\n".format(
+                    index,
+                    article.title,
+                    article.sort_number,
+                    fname.name,
+                ))
+
+        click.echo("Wrote playlist: {}".format(playlist_fname))
+        click.echo("Wrote catalog: {}".format(catalog_fname))
+
+    @staticmethod
+    def _download_to_file(url: str, fname):
+        """Download to a temp file first so interrupted runs are resumable."""
+        tmp_fname = fname.with_suffix(fname.suffix + ".part")
+        urlretrieve(url, str(tmp_fname))
+        tmp_fname.replace(fname)
 
     def save_transcript(self, id: int, episodes: Optional[set] = None):
 
